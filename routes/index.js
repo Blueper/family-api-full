@@ -4,81 +4,85 @@ const pkceChallenge = require('pkce-challenge').default;
 const {FusionAuthClient} = require('@fusionauth/typescript-client');
 const clientId = '7d31ada6-27b4-461e-bf8a-f642aacf5775';
 const clientSecret = 'yz-hU1HZRZzAml2YJdM7-Dtafksq2-lm6sEFxAPS_6g';
-const client = new FusionAuthClient('FKfzkcn2tVitDR97V62zoyVVay5d07icXamrmda8VLCxQYD3E6MaL25Y', 'https://fusionauth.ritza.co');
+const client = new FusionAuthClient('Y808ZszXwPcsXvrFsBzMdmJ7N4Lv85yLkZtJcEnJc1f3GwRO56b2RLns', 'https://fusionauth.ritza.co');
 const consentId = 'e5e81271-847b-467e-b172-770fa806f894';
 
 
-/* GET home page. */
-router.get('/', function (req, res, next) {
+// Route handler
+router.get('/', async function(req, res, next) {
+  try {
     let family = [];
-    //generate the pkce challenge/verifier dict
-    pkce_pair = pkceChallenge();
-    req.session.verifier = pkce_pair['code_verifier']
-    req.session.challenge = pkce_pair['code_challenge']
+    const pkce_pair = pkceChallenge();
+    req.session.verifier = pkce_pair['code_verifier'];
+    req.session.challenge = pkce_pair['code_challenge'];
     if (req.session.user && req.session.user.id) {
-
-        // build our family object for display
-        client.retrieveFamilies(req.session.user.id)
-            .then((response) => {
-                if (response.response.families && response.response.families.length >= 1) {
-                    // adults can only belong to one family
-                    let children = response.response.families[0].members.filter(elem => elem.role != 'Adult');
-                    let getUsers = children.map(elem => {
-                        return client.retrieveUser(elem.userId);
-                    });
-                    Promise.all(getUsers).then((users) => {
-                        users.forEach(user => {
-                            family.push({"id": user.response.user.id, "email": user.response.user.email});
-                        });
-                    }).then(() => {
-                        let getUserConsentStatuses = children.map(elem => {
-                            return client.retrieveUserConsents(elem.userId);
-                        });
-                        return Promise.all(getUserConsentStatuses);
-                    }).then((consentsResponseArray) => {
-                        // for each child, we'll want to get the status of the consent matching our consentId and put that in the family object, for that child.
-                        const userIdToStatus = {};
-                        const userIdToUserConsentId = {};
-                        consentsResponseArray.forEach((oneRes) => {
-                            const matchingConsent = oneRes.response.userConsents.filter((userConsent) => userConsent.consent.id == consentId)[0];
-                            if (matchingConsent) {
-                                const userId = matchingConsent.userId;
-                                userIdToUserConsentId[userId] = matchingConsent.id;
-                                userIdToStatus[userId] = matchingConsent.status;
-                            }
-                        });
-                        family = family.map((onePerson) => {
-                            onePerson["status"] = userIdToStatus[onePerson.id];
-                            onePerson["userConsentId"] = userIdToUserConsentId[onePerson.id];
-                            return onePerson;
-                        });
-                        //}).then(() => {
-                        res.render('index', {
-                            family: family,
-                            user: req.session.user,
-                            title: 'Family Example',
-                            challenge: pkce_pair['code_challenge']
-                        });
-                    });
-                } else {
-                    res.render('index', {family: family, user: req.session.user, title: 'Family Example', challenge: pkce_pair['code_challenge']});
-                }
-            }).catch((err) => {
-            console.log("in error");
-            console.error(JSON.stringify(err));
+      const response = await client.retrieveFamilies(req.session.user.id);
+      if (response.response.families && response.response.families.length >= 1) {
+        let children = response.response.families[0].members.filter(elem => elem.role !== 'Adult');
+        children = children.concat(response.response.families[0].members.filter(elem => elem.userId === req.session.user.id));
+        const users = await getFamilyUsers(children);
+        users.forEach(user => {
+            let self = children.filter(elem => elem.userId == user.response.user.id)[0];
+            user.response.user.role = self.role;
         });
-    } else {
-        res.render('index', {family: family, user: req.session.user, title: 'Family Example', challenge: pkce_pair['code_challenge']});
+        family = buildFamilyArray(users);
+        const consentsResponseArray = await getUserConsentStatuses(children);
+        family = updateFamilyWithConsentStatus(family, consentsResponseArray);
+      }
     }
+    res.render('index', {
+      family: family,
+      user: req.session.user,
+      title: 'Family Example',
+      challenge: pkce_pair['code_challenge']
+    });
+  } catch (error) {
+    console.error("in error");
+    console.error(JSON.stringify(error));
+    next(error);
+  }
 });
+
+// Named functions
+async function getFamilyUsers(children) {
+  const getUsers = children.map(elem => client.retrieveUser(elem.userId));
+  const users = await Promise.all(getUsers);
+  return users;
+}
+async function getUserConsentStatuses(children) {
+  const getUserConsentStatuses = children.map(elem => client.retrieveUserConsents(elem.userId));
+  const consentsResponseArray = await Promise.all(getUserConsentStatuses);
+  return consentsResponseArray;
+}
+function buildFamilyArray(users) {
+  const family = [];
+  users.forEach(user => {
+    family.push({"id": user.response.user.id, "email": user.response.user.email, "role": user.response.user.role});
+  });
+  return family;
+}
+function updateFamilyWithConsentStatus(family, consentsResponseArray) {
+  const userIdToStatus = {};
+  const userIdToUserConsentId = {};
+  consentsResponseArray.forEach((oneRes) => {
+    const matchingConsent = oneRes.response.userConsents.filter((userConsent) => userConsent.consent.id == consentId)[0];
+    if (matchingConsent) {
+      const userId = matchingConsent.userId;
+      userIdToUserConsentId[userId] = matchingConsent.id;
+      userIdToStatus[userId] = matchingConsent.status;
+    }
+  });
+  return family.map((onePerson) => {
+    onePerson["status"] = userIdToStatus[onePerson.id];
+    onePerson["userConsentId"] = userIdToUserConsentId[onePerson.id];
+    return onePerson;
+  });
+}
 
 /* OAuth return from FusionAuth */
 router.get('/oauth-redirect', function (req, res, next) {
     // This code stores the user in a server-side session
-    //client.exchangeOAuthCodeForAccessToken(
-    client.exchangeOAuthCodeForAccessTokenUsingPKCE(
-
-    req.query.code,
+    client.exchangeOAuthCodeForAccessTokenUsingPKCE(req.query.code,
         clientId,
         clientSecret,
         'http://localhost:3000/oauth-redirect',
@@ -104,85 +108,12 @@ router.get('/oauth-redirect', function (req, res, next) {
 
 });
 
-/* Confirm child list flow */
-router.get('/confirm-child-list', function (req, res, next) {
-    if (!req.session.user) {
-        // force signin
-        res.redirect(302, '/');
-    }
-    client.retrievePendingChildren(req.session.user.email)
-        .then((response) => {
-            res.render('confirmchildren', {children: response.response.users, title: 'Confirm Your Children', challenge: req.session.challenge});
-        }).catch((err) => {
-        console.log("in error");
-        console.error(JSON.stringify(err));
-    });
-});
-
-/* Confirm child action */
-router.post('/confirm-child', function (req, res, next) {
-    if (!req.session.user) {
-        // force signin
-        res.redirect(302, '/');
-    }
-    childEmail = req.body.child;
-
-    if (!childEmail) {
-        console.log("No child email provided!");
-        res.redirect(302, '/');
-    }
-
-    let childUserId = undefined;
-    client.retrieveUserByEmail(childEmail)
-        .then((response) => {
-            childUserId = response.response.user.id;
-            return client.retrieveFamilies(req.session.user.id)
-        })
-        .then((response) => {
-            if (response && response.response && response.response.families && response.response.families.length >= 1) {
-                // user is already in family
-                return response;
-            }
-            // if no families, create one for them
-            const familyRequest = {"familyMember": {"userId": req.session.user.id, "owner": true, "role": "Adult"}};
-            return client.createFamily(null, familyRequest);
-        })
-        .then((response) => {
-            //only expect one
-            const familyId = response.response.families[0].id;
-            const familyRequest = {"familyMember": {"userId": childUserId, "role": "Child"}}
-            return client.addUserToFamily(familyId, familyRequest);
-        })
-        .then((response) => {
-            // capture consent
-            const consentRequest = {
-                "userConsent": {
-                    "userId": childUserId,
-                    "consentId": consentId,
-                    "giverUserId": req.session.user.id
-                }
-            }
-            return client.createUserConsent(null, consentRequest);
-        })
-        .then((response) => {
-            // now pull existing children to be confirmed
-            client.retrievePendingChildren(req.session.user.email)
-        })
-        .then((response) => {
-            res.redirect(302, '/confirm-child-list');
-        }).catch((err) => {
-        console.log("in error");
-        console.error(JSON.stringify(err));
-    });
-});
-
 /* Change consent */
 router.post('/change-consent-status', function (req, res, next) {
     if (!req.session.user) {
         // force signin
         res.redirect(302, '/');
     }
-
     const userConsentId = req.body.userConsentId;
     let desiredStatus = req.body.desiredStatus;
     if (desiredStatus != 'Active') {
